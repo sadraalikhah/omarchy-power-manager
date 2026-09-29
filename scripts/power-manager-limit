@@ -28,7 +28,7 @@ if [[ ! "$SYS_PATH" =~ ^/sys/class/power_supply/[A-Za-z0-9_][A-Za-z0-9_.:@-]*$ ]
 fi
 
 # Apply immediately
-printf '%s\n' "$LIMIT" > "$SYS_PATH/charge_control_end_threshold" || true
+printf '%s\n' "$LIMIT" > "$SYS_PATH/charge_control_end_threshold"
 
 # Apply persistence rule
 if [ "$LIMIT" -eq 100 ]; then
