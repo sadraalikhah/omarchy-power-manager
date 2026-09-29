@@ -48,7 +48,7 @@ fi
 
 # Delegate the rest to profile switch (which now handles logind and sleep configs dynamically)
 if [ -x "$DIR/power-manager-profile-switch" ]; then
-    "$DIR/power-manager-profile-switch" "$CONFIG_FILE" >/dev/null 2>&1 || true
+    "$DIR/power-manager-profile-switch" "$CONFIG_FILE" >/dev/null
 fi
 
 echo '{"success": true, "applied": ["udev", "profile", "logind"], "errors": []}'

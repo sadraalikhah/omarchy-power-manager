@@ -56,7 +56,6 @@ BAT_CAP=$(( BAT_COUNT > 0 ? BAT_CAP_SUM / BAT_COUNT : 100 ))
 
 ENABLED="true"
 PROF_AC="performance"; PROF_BAT_HIGH="balanced"; PROF_BAT_LOW="power-saver"; BAT_THRESH=30
-BRIGHT_AUTO="false"; BRIGHT_AC=80; BRIGHT_BAT_HIGH=50; BRIGHT_BAT_LOW=20
 
 if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ] && jq empty "$CONFIG_FILE" 2>/dev/null; then
     ENABLED=$(jq -r 'if has("enabled") and .enabled == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null || echo "true")
@@ -65,24 +64,24 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ] && jq empty "$CONFIG_FILE" 2>/
     PROF_BAT_LOW=$(jq -r '(.profiles?.batteryLow // "power-saver")' "$CONFIG_FILE" 2>/dev/null || echo "power-saver")
     BAT_THRESH=$(jq -r '(.batteryThreshold // 30)' "$CONFIG_FILE" 2>/dev/null || echo "30")
     
-    BRIGHT_AUTO=$(jq -r 'if .brightness?.auto == true then "true" else "false" end' "$CONFIG_FILE" 2>/dev/null || echo "false")
-    BRIGHT_AC=$(jq -r '(.brightness?.ac // 80)' "$CONFIG_FILE" 2>/dev/null || echo "80")
-    BRIGHT_BAT_HIGH=$(jq -r '(.brightness?.batteryHigh // 50)' "$CONFIG_FILE" 2>/dev/null || echo "50")
-    BRIGHT_BAT_LOW=$(jq -r '(.brightness?.batteryLow // 20)' "$CONFIG_FILE" 2>/dev/null || echo "20")
+
 fi
 if ! [[ "$BAT_THRESH" =~ ^[0-9]+$ ]]; then BAT_THRESH=30; fi
+for profile in "$PROF_AC" "$PROF_BAT_HIGH" "$PROF_BAT_LOW"; do
+    case "$profile" in power-saver|balanced|performance) ;; *) echo 'Invalid power profile' >&2; exit 1 ;; esac
+done
 
-NEW_BRIGHT=""; STATE_KEY="ac"
+STATE_KEY="ac"
 if [ "$ENABLED" = "false" ]; then
     NEW_PROF="$PREV"; REASON="disabled"; STATE_KEY="ac"
 else
     if [ "$AC_ONLINE" = "true" ] || [ "$BAT_PRESENT" = "false" ]; then
-        NEW_PROF="$PROF_AC"; REASON="ac_connected"; NEW_BRIGHT="$BRIGHT_AC"; STATE_KEY="ac"
+        NEW_PROF="$PROF_AC"; REASON="ac_connected"; STATE_KEY="ac"
     else
         if [ "$BAT_CAP" -le "$BAT_THRESH" ]; then
-            NEW_PROF="$PROF_BAT_LOW"; REASON="low_battery"; NEW_BRIGHT="$BRIGHT_BAT_LOW"; STATE_KEY="batteryLow"
+            NEW_PROF="$PROF_BAT_LOW"; REASON="low_battery"; STATE_KEY="batteryLow"
         else
-            NEW_PROF="$PROF_BAT_HIGH"; REASON="battery"; NEW_BRIGHT="$BRIGHT_BAT_HIGH"; STATE_KEY="batteryHigh"
+            NEW_PROF="$PROF_BAT_HIGH"; REASON="battery"; STATE_KEY="batteryHigh"
         fi
     fi
 fi
@@ -91,56 +90,24 @@ if [ -z "$NEW_PROF" ] || [ "$NEW_PROF" = "null" ]; then NEW_PROF="balanced"; fi
 if [ "$ENABLED" = "true" ]; then
     # PROFILE SWITCH
     if [ "$NEW_PROF" != "none" ]; then
-        if command -v powerprofilesctl >/dev/null 2>&1; then
-            powerprofilesctl set "$NEW_PROF" 2>/dev/null || true
-        elif command -v omarchy-powerprofiles-set >/dev/null 2>&1; then
-            omarchy-powerprofiles-set autodetect "$NEW_PROF" 2>/dev/null || true
+        source_mode=battery
+        [[ "$STATE_KEY" == ac ]] && source_mode=ac
+        if [ "$(id -u)" -eq 0 ]; then
+            config_owner=$(stat -c '%U' -- "$CONFIG_FILE")
+            [[ "$config_owner" != root && "$config_owner" != UNKNOWN ]] || { echo 'Config must belong to the desktop user' >&2; exit 1; }
+            runuser -u "$config_owner" -- /usr/bin/omarchy-powerprofiles-set "$source_mode" "$NEW_PROF"
+        else
+            omarchy-powerprofiles-set "$source_mode" "$NEW_PROF"
         fi
-        
-        STATE_DIRS=()
-        if [ -n "${XDG_STATE_HOME:-}" ]; then STATE_DIRS+=("$XDG_STATE_HOME/omarchy/powerprofiles"); fi
-        if [ -n "${HOME:-}" ]; then STATE_DIRS+=("$HOME/.local/state/omarchy/powerprofiles"); fi
-        for u_home in /home/*; do
-            if [ -d "$u_home" ]; then STATE_DIRS+=("$u_home/.local/state/omarchy/powerprofiles"); fi
-        done
-        for sdir in "${STATE_DIRS[@]}"; do
-            mkdir -p "$sdir" 2>/dev/null || true
-            if [ "$AC_ONLINE" = "true" ] || [ "$BAT_PRESENT" = "false" ]; then
-                echo "$PROF_AC" > "$sdir/ac" 2>/dev/null || true
-                if [ ! -f "$sdir/battery" ]; then echo "$PROF_BAT_HIGH" > "$sdir/battery" 2>/dev/null || true; fi
-            else
-                echo "$NEW_PROF" > "$sdir/battery" 2>/dev/null || true
-                if [ ! -f "$sdir/ac" ]; then echo "$PROF_AC" > "$sdir/ac" 2>/dev/null || true; fi
-            fi
-        done
     fi
 
-    # BRIGHTNESS SWITCH
-    if [ "$BRIGHT_AUTO" = "true" ] && [ -n "$NEW_BRIGHT" ] && [ "$NEW_BRIGHT" != "0" ] && [ "$NEW_BRIGHT" != "0%" ]; then
-        if ! [[ "$NEW_BRIGHT" =~ %$ ]]; then NEW_BRIGHT="${NEW_BRIGHT}%"; fi
-        if [ "$(id -u)" -eq 0 ]; then
-            if command -v brightnessctl >/dev/null 2>&1; then
-                brightnessctl set "$NEW_BRIGHT" >/dev/null 2>&1 || true
-            fi
-        else
-            if command -v omarchy-brightness-display >/dev/null 2>&1; then
-                omarchy-brightness-display --no-osd "$NEW_BRIGHT" >/dev/null 2>&1 || true
-            elif command -v brightnessctl >/dev/null 2>&1; then
-                brightnessctl set "$NEW_BRIGHT" >/dev/null 2>&1 || true
-            fi
-        fi
-    fi
-    
     # DYNAMIC LOGIND CONFIGURATION
     if [ "$(id -u)" -eq 0 ] || [ -n "${OMARCHY_SYSTEMD_LOGIND_DIR:-}" ] || [ -n "${OMARCHY_SYSTEMD_SLEEP_DIR:-}" ]; then
         # Parse configs
         IDLE_MINS=$(jq -r ".idle?.${STATE_KEY}?.sleepAfterMinutes // 15" "$CONFIG_FILE" 2>/dev/null || echo 15)
         IDLE_ACT=$(jq -r ".idle?.${STATE_KEY}?.afterSleep // \"suspend\"" "$CONFIG_FILE" 2>/dev/null || echo "suspend")
         
-        HIB_AC_MINS=$(jq -r '.idle?.ac?.hibernateAfterMinutes // 15' "$CONFIG_FILE" 2>/dev/null || echo 15)
-        HIB_BAT_MINS=$(jq -r '.idle?.batteryHigh?.hibernateAfterMinutes // .idle?.batteryLow?.hibernateAfterMinutes // 15' "$CONFIG_FILE" 2>/dev/null || echo 15)
-        HIB_MINS=$HIB_AC_MINS
-        if [ "$HIB_BAT_MINS" -gt 0 ] && [ "$HIB_BAT_MINS" -lt "$HIB_AC_MINS" ]; then HIB_MINS=$HIB_BAT_MINS; fi
+        HIB_MINS=$(jq -r ".idle?.${STATE_KEY}?.hibernateAfterMinutes // 15" "$CONFIG_FILE")
         
         LID_IGN=$(jq -r 'if .lid?.ignoreLidClose == true then "true" else "false" end' "$CONFIG_FILE" 2>/dev/null || echo "false")
         LID_AC_ACT=$(jq -r '.lid?.ac?.action // "suspend"' "$CONFIG_FILE" 2>/dev/null || echo "suspend")
@@ -154,8 +121,14 @@ if [ "$ENABLED" = "true" ]; then
             LID_AC_ACT="ignore"
             LID_BAT_ACT="ignore"
         fi
+
+        for minutes in "$IDLE_MINS" "$HIB_MINS"; do
+            [[ "$minutes" =~ ^[0-9]+$ ]] && (( minutes <= 10080 )) || { echo 'Invalid sleep duration' >&2; exit 1; }
+        done
+        for action in "$IDLE_ACT" "$LID_AC_ACT" "$LID_BAT_ACT"; do
+            case "$action" in ignore|suspend|hibernate|suspend-then-hibernate|hybrid-sleep|poweroff) ;; *) echo 'Invalid sleep action' >&2; exit 1 ;; esac
+        done
         
-        IDLE_SEC=$((IDLE_MINS * 60))
         HIB_SEC=$((HIB_MINS * 60))
         
         LOGIND_DIR="${OMARCHY_SYSTEMD_LOGIND_DIR:-/etc/systemd/logind.conf.d}"
@@ -167,39 +140,19 @@ if [ "$ENABLED" = "true" ]; then
 HandleLidSwitch=$LID_BAT_ACT
 HandleLidSwitchExternalPower=$LID_AC_ACT
 HandleLidSwitchDocked=ignore
-IdleAction=$IDLE_ACT
-IdleActionSec=$IDLE_SEC
+IdleAction=ignore
 INI
         
         cat <<INI > "$SLEEP_DIR/90-power-manager.conf"
 [Sleep]
 HibernateDelaySec=$HIB_SEC
-SuspendEstimationSec=3600
+HibernateOnACPower=yes
 INI
         
         
-    # SYNC OMARCHY SHELL IDLE TIMERS
-    SHELL_CONF="$HOME/.config/omarchy/shell.json"
-    if [ "$(id -u)" -eq 0 ]; then
-        ACTIVE_USER=$(who -u 2>/dev/null | awk '{print $1}' | head -n 1 || true)
-        if [ -n "$ACTIVE_USER" ]; then
-            USER_HOME=$(getent passwd "$ACTIVE_USER" | cut -d: -f6)
-            REAL_SHELL_CONF="$USER_HOME/.config/omarchy/shell.json"
-            if [ -f "$REAL_SHELL_CONF" ] && [ "$IDLE_MINS" -gt 0 ]; then
-                LOCK_SEC=$((IDLE_MINS * 60))
-                # Screensaver starts 30 seconds before sleep/lock
-                SCR_SEC=$((LOCK_SEC - 30))
-                if [ "$SCR_SEC" -lt 30 ]; then SCR_SEC=30; fi
-                
-                # Use jq to update the idle config
-                jq ".idle.screensaver = $SCR_SEC | .idle.lock = $LOCK_SEC" "$REAL_SHELL_CONF" > "${REAL_SHELL_CONF}.tmp" && chown "$ACTIVE_USER:" "${REAL_SHELL_CONF}.tmp" && mv "${REAL_SHELL_CONF}.tmp" "$REAL_SHELL_CONF" || true
-            fi
-        fi
-    fi
-
         systemctl kill -s HUP systemd-logind 2>/dev/null || true
     fi
 fi
 
-echo "{\"previous\": \"$PREV\", \"current\": \"$NEW_PROF\", \"brightness\": \"$NEW_BRIGHT\", \"state\": \"$STATE_KEY\", \"reason\": \"$REASON\", \"success\": true}"
+echo "{\"previous\": \"$PREV\", \"current\": \"$NEW_PROF\", \"state\": \"$STATE_KEY\", \"reason\": \"$REASON\", \"success\": true}"
 exit 0
