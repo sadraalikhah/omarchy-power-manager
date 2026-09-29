@@ -16,6 +16,14 @@ function defaultConfig() {
       batteryHigh: 50,
       batteryLow: 30
     },
+    hardware: {
+      gpuAuto: false,
+      gpuAc: "hybrid",
+      gpuBattery: "integrated",
+      refreshAuto: false,
+      refreshAc: 144,
+      refreshBattery: 60
+    },
     idle: {
       ac: {
         sleepAfterMinutes: 30,

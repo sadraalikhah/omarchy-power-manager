@@ -42,6 +42,9 @@ Panel {
   property var config: Model.defaultConfig()
   property var editConfig: Model.defaultConfig()
   property bool configLoaded: false
+  readonly property string configPath: Quickshell.env("HOME") + "/.config/onlyvishesh.power-manager.json"
+  readonly property string sessionProgram: Quickshell.env("HOME") + "/.config/omarchy/plugins/onlyvishesh.power-manager/scripts/power-manager-session"
+  property bool helpersAvailable: false
   property bool configDirty: JSON.stringify(config) !== JSON.stringify(editConfig) || (tracker.supported && root.pendingLimit !== tracker.limit)
 
   // ── UPower convenience ──
@@ -147,6 +150,7 @@ Panel {
   // ── Lifecycle ──
   Component.onCompleted: {
     configReadProc.running = true
+    helperProbe.running = true
     stayAwakeProbe.running = true
   }
 
@@ -225,11 +229,92 @@ Panel {
     }
   }
 
+  // A single desktop process applies preferences and remembers manual changes.
+  property var sessionBaseline: ({})
+  property var hardwareStatus: ({})
+  property string lastSessionSignature: ""
+  readonly property string sessionSignature: root.configLoaded && !!root.bar && root.config.enabled
+    ? JSON.stringify({ state: root.currentStateKey, profiles: root.config.profiles, hardware: root.config.hardware, brightness: root.config.brightness }) : ""
+  onSessionSignatureChanged: queueSessionPolicy()
+
+  function queueSessionPolicy(force) {
+    if (!root.sessionSignature) return
+    if (force) root.lastSessionSignature = ""
+    sessionApplyTimer.restart()
+  }
+
+  Timer {
+    id: sessionApplyTimer
+    interval: 500
+    onTriggered: {
+      if (!root.sessionSignature || root.sessionSignature === root.lastSessionSignature || sessionProc.running) return
+      sessionProc.command = [root.sessionProgram, "apply", root.configPath, root.currentStateKey, JSON.stringify(root.sessionBaseline)]
+      root.lastSessionSignature = root.sessionSignature
+      sessionProc.running = true
+    }
+  }
+  Timer {
+    interval: 30000
+    running: !!root.sessionSignature && root.sessionBaseline.state === root.currentStateKey
+      && root.lastSessionSignature === root.sessionSignature && !sessionProc.running
+    repeat: true
+    onTriggered: {
+      sessionProc.command = [root.sessionProgram, "observe", root.configPath, root.currentStateKey, JSON.stringify(root.sessionBaseline)]
+      sessionProc.running = true
+    }
+  }
+  Process {
+    id: sessionProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var result = JSON.parse(text)
+          root.hardwareStatus = { state: result.state, actual: result.actual, remembered: result.remembered, errors: result.errors }
+          if (result.settings && result.actual) {
+            var keepEdits = root.opened && root.configDirty
+            root.config = Model.mergeWithDefaults(result.settings)
+            if (!keepEdits) root.editConfig = JSON.parse(JSON.stringify(root.config))
+            root.sessionBaseline = { state: result.state, actual: result.actual }
+            if (result.state === root.currentStateKey) root.lastSessionSignature = root.sessionSignature
+          }
+          if (result.errors && result.errors.length) {
+            Quickshell.execDetached(["omarchy-notification-send", "-e", "Power Manager", result.errors.join("; ")])
+          }
+        } catch (error) {
+          console.warn("Power Manager could not read desktop policy result:", error)
+        }
+      }
+    }
+    onExited: function() {
+      if (root.sessionSignature !== root.lastSessionSignature) root.queueSessionPolicy()
+      if (root.opened) root.refresh()
+    }
+  }
+
   // ── IPC handlers ──
   IpcHandler {
     target: "power-manager"
     function open() { root.openedFromMenu = true; root.open() }
     function toggle() { root.openedFromMenu = true; root.toggle() }
+    function settings() { root.openedFromMenu = true; root.open(); root.currentTab = "advanced" }
+    function profiles() { root.openedFromMenu = true; root.open(); root.currentTab = "profiles" }
+    function status(): string {
+      return JSON.stringify({
+        enabled: root.config.enabled,
+        state: root.currentStateKey,
+        sleepAfterMinutes: root.idleSleepMins,
+        sleepAction: root.idleAction,
+        hibernateAfterMinutes: root.config.idle[root.currentStateKey].hibernateAfterMinutes,
+        respectsInhibitors: sleepMonitor.respectInhibitors,
+        stayAwake: root.stayAwake,
+        sleepMonitorEnabled: sleepMonitor.enabled,
+        sleepMonitorIdle: sleepMonitor.isIdle,
+        hardware: root.hardwareStatus,
+        helpersAvailable: root.helpersAvailable,
+        settings: root.config
+      })
+    }
   }
 
   // ── Processes ──
@@ -253,16 +338,24 @@ Panel {
   property string pendingWrite: ""
   Process {
     id: configWriteProc
-    command: ["sh", "-c", "echo \"$1\" | base64 -d > \"$HOME/.config/onlyvishesh.power-manager.json\"", "sh", root.pendingWrite]
-    onExited: {
-      root.config = JSON.parse(JSON.stringify(root.editConfig))
-      applyProc.running = true
+    command: [root.sessionProgram, "save", root.configPath, root.pendingWrite]
+    onExited: function(code) {
+      if (code !== 0) return
+      root.config = Model.mergeWithDefaults(JSON.parse(Qt.atob(root.pendingWrite)))
+      root.queueSessionPolicy(true)
+      if (root.helpersAvailable) applyProc.running = true
     }
   }
 
   Process {
+    id: helperProbe
+    command: ["test", "-x", "/usr/local/libexec/omarchy-power-manager/power-manager-apply"]
+    onExited: function(code) { root.helpersAvailable = code === 0 }
+  }
+
+  Process {
     id: applyProc
-    command: ["pkexec", "/usr/local/libexec/omarchy-power-manager/power-manager-apply"]
+    command: ["pkexec", "/usr/local/libexec/omarchy-power-manager/power-manager-apply", Quickshell.env("HOME") + "/.config/onlyvishesh.power-manager.json"]
     onExited: function(code, status) {
       diagnosticsProc.running = true
       profilesProc.running = true
@@ -809,6 +902,27 @@ Panel {
         SettingRow { label: "Low battery threshold (%)"; widgetType: "number"; configKey: "batteryThreshold" }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
+        PanelSectionHeader {
+          text: "GPU AND DISPLAY"
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        }
+        SettingRow { label: "Automatic GPU switching"; widgetType: "toggle"; configKey: "hardware.gpuAuto" }
+        SettingRow { label: "GPU on AC"; widgetType: "dropdown"; options: ["hybrid", "integrated", "smart"]; configKey: "hardware.gpuAc" }
+        SettingRow { label: "GPU on battery"; widgetType: "dropdown"; options: ["hybrid", "integrated", "smart"]; configKey: "hardware.gpuBattery" }
+        SettingRow { label: "Automatic refresh rate"; widgetType: "toggle"; configKey: "hardware.refreshAuto" }
+        SettingRow { label: "Refresh rate on AC (Hz)"; widgetType: "number"; configKey: "hardware.refreshAc" }
+        SettingRow { label: "Refresh rate on battery (Hz)"; widgetType: "number"; configKey: "hardware.refreshBattery" }
+        Text {
+          width: parent.width
+          text: "Manual live GPU, refresh-rate and brightness changes are saved for the current power source. Low-battery brightness has its own setting."
+          color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.7)
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
+        PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
 
         PanelSectionHeader {
           text: "AUTOMATIC BRIGHTNESS"
@@ -839,6 +953,15 @@ Panel {
           spacing: Style.space(12)
 
         SettingRow { label: "Enable automatic management"; widgetType: "toggle"; configKey: "enabled" }
+        Text {
+          width: parent.width
+          visible: !root.helpersAvailable
+          text: "GPU, display, brightness and idle timing can be saved here. Changes to the hibernation delay, lid rules or charging limit need system setup."
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground; visible: tracker.supported }
 
@@ -896,6 +1019,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               CustomNumberField {
                 width: parent.width
+                enabled: root.helpersAvailable
                 anchors.verticalCenter: parent.verticalCenter
                 value: root.pendingLimit
                 onModified: function(val) {
@@ -925,7 +1049,7 @@ Panel {
         }
         SettingRow { label: "Minutes before sleep"; widgetType: "number"; configKey: "idle.ac.sleepAfterMinutes" }
         SettingRow { label: "Action on idle"; widgetType: "dropdown"; options: root.actionOptions; configKey: "idle.ac.afterSleep" }
-        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.ac.hibernateAfterMinutes" }
+        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.ac.hibernateAfterMinutes"; enabled: root.helpersAvailable }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
 
@@ -937,7 +1061,7 @@ Panel {
         }
         SettingRow { label: "Minutes before sleep"; widgetType: "number"; configKey: "idle.batteryHigh.sleepAfterMinutes" }
         SettingRow { label: "Action on idle"; widgetType: "dropdown"; options: root.actionOptions; configKey: "idle.batteryHigh.afterSleep" }
-        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.batteryHigh.hibernateAfterMinutes" }
+        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.batteryHigh.hibernateAfterMinutes"; enabled: root.helpersAvailable }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
 
@@ -949,7 +1073,7 @@ Panel {
         }
         SettingRow { label: "Minutes before sleep"; widgetType: "number"; configKey: "idle.batteryLow.sleepAfterMinutes" }
         SettingRow { label: "Action on idle"; widgetType: "dropdown"; options: root.actionOptions; configKey: "idle.batteryLow.afterSleep" }
-        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.batteryLow.hibernateAfterMinutes" }
+        SettingRow { label: "Hibernate after (min)"; widgetType: "number"; configKey: "idle.batteryLow.hibernateAfterMinutes"; enabled: root.helpersAvailable }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
 
@@ -959,10 +1083,10 @@ Panel {
           foreground: root.bar ? root.bar.foreground : Color.foreground
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         }
-        SettingRow { label: "Ignore lid close"; widgetType: "toggle"; configKey: "lid.ignoreLidClose" }
-        SettingRow { label: "On AC power"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.ac.action" }
-        SettingRow { label: "Battery High"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.batteryHigh.action" }
-        SettingRow { label: "Battery Low"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.batteryLow.action" }
+        SettingRow { label: "Ignore lid close"; widgetType: "toggle"; configKey: "lid.ignoreLidClose"; enabled: root.helpersAvailable }
+        SettingRow { label: "On AC power"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.ac.action"; enabled: root.helpersAvailable }
+        SettingRow { label: "Battery High"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.batteryHigh.action"; enabled: root.helpersAvailable }
+        SettingRow { label: "Battery Low"; widgetType: "dropdown"; options: root.actionOptions; configKey: "lid.batteryLow.action"; enabled: root.helpersAvailable }
 
         PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
 

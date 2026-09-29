@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Apply and remember desktop power preferences without root privileges."""
+
+import base64
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+STATES = {"ac", "batteryHigh", "batteryLow"}
+GPU_MODES = {"integrated", "hybrid", "smart"}
+
+
+def run(*args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"{args[0]} failed")
+    return result.stdout.strip()
+
+
+def integer(value, minimum, maximum):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"Expected an integer between {minimum} and {maximum}")
+    return value
+
+
+def save(path, config):
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(config, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def snapshot():
+    actual = {}
+    try:
+        monitors = json.loads(run("hyprctl", "monitors", "-j"))
+        monitor = next((m for m in monitors if m["name"].startswith(("eDP", "LVDS", "DSI"))), None)
+        if monitor:
+            actual["monitor"] = monitor
+            actual["refresh"] = round(monitor["refreshRate"])
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    try:
+        match = re.search(r"^Current Mode:\s*(\w+)", run("cardwire", "get"), re.M)
+        if match and match[1].lower() in GPU_MODES:
+            actual["gpu"] = match[1].lower()
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        device = run("omarchy-hw-display")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", device):
+            raise ValueError("Invalid backlight device")
+        backlight = Path("/sys/class/backlight") / device
+        actual["brightness"] = round(100 * int((backlight / "brightness").read_text()) / int((backlight / "max_brightness").read_text()))
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError, ZeroDivisionError):
+        pass
+    return actual
+
+
+def remember(config, state, baseline, actual):
+    hardware = config.setdefault("hardware", {})
+    brightness = config.setdefault("brightness", {})
+    source = "Ac" if state == "ac" else "Battery"
+    changed = []
+    for field, enabled, owner, key in (
+        ("gpu", hardware.get("gpuAuto", False), hardware, "gpu" + source),
+        ("refresh", hardware.get("refreshAuto", False), hardware, "refresh" + source),
+        ("brightness", brightness.get("auto", False), brightness, state),
+    ):
+        if enabled and field in actual and field in baseline and actual[field] != baseline[field]:
+            value = actual[field]
+            if field == "brightness" and value < 1:
+                continue
+            if field == "refresh" and not 30 <= value <= 360:
+                continue
+            if owner.get(key) != value:
+                owner[key] = value
+                changed.append(field)
+    return changed
+
+
+def apply(config, state, actual):
+    hardware = config.get("hardware", {})
+    brightness = config.get("brightness", {})
+    source = "Ac" if state == "ac" else "Battery"
+    gpu = hardware.get("gpu" + source, "hybrid" if state == "ac" else "integrated")
+    refresh = integer(hardware.get("refresh" + source, 144 if state == "ac" else 60), 30, 360)
+    level = integer(brightness.get(state, {"ac": 80, "batteryHigh": 50, "batteryLow": 30}[state]), 0, 100)
+    profile = config.get("profiles", {}).get(state, "balanced" if state == "ac" else "power-saver")
+    if gpu not in GPU_MODES:
+        raise ValueError("Unsupported GPU mode")
+    if profile not in {"balanced", "power-saver", "performance"}:
+        raise ValueError("Unsupported power profile")
+    errors = []
+    operations = []
+    monitor = actual.get("monitor")
+    if hardware.get("refreshAuto", False) and monitor and actual.get("refresh") != refresh:
+        # Match an advertised mode; preserve the display's position, scale and rotation.
+        modes = []
+        for mode in monitor.get("availableModes", []):
+            match = re.fullmatch(r"(\d+x\d+)@([0-9.]+)Hz", mode)
+            if match and round(float(match[2])) == refresh:
+                modes.append(match[1] + "@" + match[2])
+        width, height = monitor["width"], monitor["height"]
+        if monitor.get("transform", 0) % 2:
+            width, height = height, width
+        mode = next((m for m in modes if m.startswith(f"{width}x{height}@")), None)
+        if mode:
+            code = "hl.monitor({ output = %s, mode = %s, position = %s, scale = %s, transform = %s })" % (
+                json.dumps(monitor["name"]), json.dumps(mode),
+                json.dumps(f"{monitor['x']}x{monitor['y']}"), monitor["scale"], monitor.get("transform", 0))
+            operations.append(("refresh", ("hyprctl", "eval", code)))
+        else:
+            errors.append(f"The internal display does not advertise {refresh} Hz at its current resolution")
+    if brightness.get("auto", False) and level and actual.get("brightness") != level and monitor:
+        operations.append(("brightness", ("omarchy-brightness-display", "--no-osd", "--monitor", monitor["name"], f"{level}%")))
+    if hardware.get("gpuAuto", False) and actual.get("gpu") != gpu:
+        mux = Path("/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value")
+        if mux.exists() and mux.read_text().strip() == "0":
+            errors.append("Ultimate GPU mode needs a restart. Automatic switching left it unchanged")
+        else:
+            operations.append(("gpu", ("cardwire", "set", gpu)))
+    for name, command in operations:
+        try:
+            output = run(*command)
+            if name == "refresh" and output and output != "ok":
+                raise RuntimeError(output)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            errors.append(f"{name}: {error}")
+    try:
+        # Use the native command so its charger-change restoration remembers
+        # the same per-source rule, rather than a second private profile cache.
+        run("omarchy-powerprofiles-set", "ac" if state == "ac" else "battery", profile)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+        errors.append(f"power profile: {error}")
+    return errors
+
+
+def main():
+    if os.geteuid() == 0:
+        raise ValueError("Run this helper as the desktop user")
+    command, filename = sys.argv[1:3]
+    if command not in {"save", "apply", "observe"}:
+        raise ValueError("Invalid command")
+    path = Path(filename).expanduser()
+    with open(str(path) + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if command == "save":
+            config = json.loads(base64.b64decode(sys.argv[3]).decode())
+            if not isinstance(config, dict):
+                raise ValueError("Settings must be an object")
+            save(path, config)
+            print(json.dumps({"settings": config}))
+            return
+        state = sys.argv[3]
+        if state not in STATES:
+            raise ValueError("Invalid power state")
+        config = json.loads(path.read_text())
+        previous = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
+        actual = snapshot()
+        changed = []
+        if config.get("enabled", True) and previous.get("state") in STATES:
+            # Capture pending manual changes before a charger/threshold transition.
+            changed = remember(config, previous["state"], previous.get("actual", {}), actual)
+        if changed:
+            save(path, config)
+        errors = []
+        if command == "apply":
+            if config.get("enabled", True):
+                errors = apply(config, state, actual)
+                actual = snapshot()
+        elif command != "observe":
+            raise ValueError("Invalid command")
+        print(json.dumps({"state": state, "actual": actual, "settings": config,
+                          "remembered": changed, "errors": errors}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, IndexError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({"errors": [str(error)]}))
+        sys.exit(1)
