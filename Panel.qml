@@ -41,6 +41,7 @@ Panel {
   // ── Config state ──
   property var config: Model.defaultConfig()
   property var editConfig: Model.defaultConfig()
+  property bool configLoaded: false
   property bool configDirty: JSON.stringify(config) !== JSON.stringify(editConfig) || (tracker.supported && root.pendingLimit !== tracker.limit)
 
   // ── UPower convenience ──
@@ -144,7 +145,10 @@ Panel {
   }
 
   // ── Lifecycle ──
-  Component.onCompleted: configReadProc.running = true
+  Component.onCompleted: {
+    configReadProc.running = true
+    stayAwakeProbe.running = true
+  }
 
   onOpenedChanged: {
     if (opened) {
@@ -164,86 +168,62 @@ Panel {
     if (!brightnessReadProc.running) brightnessReadProc.running = true
   }
 
-  // ── Native Idle Suspend ──
-  readonly property string currentStateKey: root.discharging ? (root.batteryFrac <= (root.getVal("batteryThreshold", 30)/100.0) ? "batteryLow" : "batteryHigh") : "ac"
-  readonly property int idleSleepMins: root.getVal("idle." + currentStateKey + ".sleepAfterMinutes", 0)
-  readonly property string idleAction: root.getVal("idle." + currentStateKey + ".afterSleep", "ignore")
+  // Saved settings drive automation; editing the panel does not apply them.
+  readonly property string currentStateKey: root.discharging
+    ? (root.batteryFrac <= (root.config.batteryThreshold / 100.0) ? "batteryLow" : "batteryHigh") : "ac"
+  readonly property int idleSleepMins: root.config.idle[currentStateKey].sleepAfterMinutes
+  readonly property string idleAction: root.config.idle[currentStateKey].afterSleep
+  readonly property string stayAwakeDir: Quickshell.env("HOME") + "/.local/state/omarchy/indicators"
+  property bool stayAwake: false
+  property bool stayAwakeLoaded: false
 
-  property bool wasIdle: false
-  property int idleCountdown: 0
   Process {
-    id: idleStatusProc
-    command: ["sh", "-c", "WAYLAND_DISPLAY= echo \"$(qs ipc --any-display -p /usr/share/omarchy/shell call idle status 2>/dev/null)\" \"|||\" \"$(qs ipc --any-display -p /usr/share/omarchy/shell call lock status 2>/dev/null)\""]
-    stdout: SplitParser {
-      onRead: function(line) {
-        var res = String(line).trim()
-        if (res !== "" && res.indexOf("|||") !== -1) {
-          try {
-            var parts = res.split("|||")
-            var idleSt = JSON.parse(parts[0].trim())
-            var lockSt = JSON.parse(parts[1].trim())
-            
-            var isSleepable = (idleSt.inIdleCycle === true || lockSt.locked === true);
-            var isTyping = (lockSt.locked === true && (lockSt.authenticating || lockSt.unlocking || lockSt.previewTyped > 0));
-            
-            if (isSleepable) {
-              if (!root.wasIdle) {
-                root.wasIdle = true
-                var elapsed = 0;
-                if (lockSt.locked) elapsed = idleSt.lock;
-                else if (idleSt.inIdleCycle) elapsed = idleSt.screensaver;
-                
-                root.idleCountdown = (root.idleSleepMins * 60) - elapsed;
-                
-                // CRITICAL: If they set sleep to 1 min (60s) and elapsed is 60s, it would be 0.
-                // Always ensure at least 60 seconds of countdown upon waking up so it doesn't loop.
-                if (root.idleCountdown < 60) root.idleCountdown = 60;
-                
-                console.log("IDLE: System is sleepable. Starting countdown:", root.idleCountdown)
-              } else {
-                if (isTyping) {
-                  root.idleCountdown = 60; // pause and give 60s to type password
-                } else {
-                  root.idleCountdown -= 5;
-                }
-                
-                if (root.idleCountdown <= 0) {
-                  console.log("IDLE: SLEEPING NOW!")
-                  var cmd = ""
-                  if (root.idleAction === "suspend") cmd = "systemctl suspend"
-                  else if (root.idleAction === "hibernate") cmd = "systemctl hibernate"
-                  else if (root.idleAction === "suspend-then-hibernate") cmd = "systemctl suspend-then-hibernate"
-                  else if (root.idleAction === "hybrid-sleep") cmd = "systemctl hybrid-sleep"
-                  else if (root.idleAction === "poweroff") cmd = "systemctl poweroff"
-                  if (cmd !== "") {
-                    console.log("IDLE EXECUTING:", cmd)
-                    idleActionProc.command = ["bash", "-c", cmd]
-                    idleActionProc.running = true
-                  }
-                  
-                  // Reset properly so it evaluates their custom timeout dynamically next time!
-                  root.wasIdle = false
-                }
-              }
-            } else {
-              if (root.wasIdle) console.log("IDLE: Canceled by user activity")
-              root.wasIdle = false
-            }
-          } catch(e) {}
-        }
-      }
+    id: stayAwakeProbe
+    command: ["test", "-e", root.stayAwakeDir + "/stay-awake"]
+    onExited: function(code) {
+      root.stayAwake = code === 0
+      root.stayAwakeLoaded = code === 0 || code === 1
+      stayAwakeWatcher.reload()
     }
   }
-
-  Timer {
-    id: pluginIdleTimer
-    running: !!root.bar && root.getVal("enabled", true) && root.idleSleepMins > 0 && root.idleAction !== "ignore"
-    repeat: true
-    interval: 5000
-    onTriggered: { console.log("IDLE DEBUG - State:", root.currentStateKey, "Mins:", root.idleSleepMins, "Countdown:", root.idleCountdown); idleStatusProc.running = true }
+  FileView {
+    id: stayAwakeWatcher
+    path: root.stayAwakeDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: if (!stayAwakeProbe.running) stayAwakeProbe.running = true
   }
 
-  Process { id: idleActionProc }
+  IdleMonitor {
+    id: sleepMonitor
+    enabled: !!root.bar && root.configLoaded && root.config.enabled && root.stayAwakeLoaded
+      && !root.stayAwake && root.idleSleepMins > 0 && root.idleAction !== "ignore"
+    timeout: Math.max(1, root.idleSleepMins * 60)
+    respectInhibitors: true
+    onIsIdleChanged: {
+      if (isIdle) root.requestIdleSleep()
+      else sleepRetryTimer.stop()
+    }
+  }
+  function requestIdleSleep() {
+    var actions = ["suspend", "hibernate", "suspend-then-hibernate", "hybrid-sleep", "poweroff"]
+    if (!sleepMonitor.enabled || !sleepMonitor.isIdle || idleActionProc.running || actions.indexOf(root.idleAction) === -1) return
+    idleActionProc.command = ["bash", "-c",
+      '[[ -e "$HOME/.local/state/omarchy/indicators/stay-awake" ]] || exec systemctl --check-inhibitors=yes "$1"', "bash", root.idleAction]
+    idleActionProc.running = true
+  }
+  Timer {
+    id: sleepRetryTimer
+    interval: 30000
+    onTriggered: root.requestIdleSleep()
+  }
+  Process {
+    id: idleActionProc
+    onExited: function(code) {
+      // A systemd sleep inhibitor can outlast the compositor idle deadline.
+      if (code !== 0 && sleepMonitor.enabled && sleepMonitor.isIdle) sleepRetryTimer.restart()
+    }
+  }
 
   // ── IPC handlers ──
   IpcHandler {
@@ -264,6 +244,7 @@ Panel {
           var merged = Model.mergeWithDefaults(parsed)
           root.config = merged
           root.editConfig = JSON.parse(JSON.stringify(merged))
+          root.configLoaded = true
         } catch(e) {}
       }
     }
