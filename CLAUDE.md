@@ -3,8 +3,10 @@
 ## Architecture
 
 - **Frontend**: `Panel.qml`. Uses native components (`CustomDropdown`, `CustomNumberField`, `CustomButton`).
-- **State**: `Model.js`. Loads/saves `~/.config/onlyvishesh.power-manager.json`.
-- **Backend**: `scripts/power-manager-profile-switch`. Headless `udev` hook rewriting systemd logind rules.
+- **State**: `Model.js` defines defaults. The panel loads `~/.config/onlyvishesh.power-manager.json` and keeps unsaved edits separate from active settings.
+- **Desktop policy**: `scripts/power-manager-session` applies and remembers per-source GPU, display, brightness, and native Omarchy power profiles. It saves settings atomically under a file lock and runs as the desktop user.
+- **Idle sleep**: `Panel.qml` uses `Quickshell.Wayland.IdleMonitor`, Omarchy's stay-awake indicator, and systemd inhibitor checks. Omarchy owns lock and screensaver timing.
+- **Backend**: `scripts/power-manager-profile-switch` updates privileged lid and hibernation rules. It leaves systemd idle actions disabled and delegates native profile changes to the desktop user.
 - **Elevation**: `scripts/power-manager-apply`. Triggered via `pkexec` for zero-sandbox-violation logind overrides.
 
 ## Customize UI
@@ -37,4 +39,5 @@ When `suspend-then-hibernate` throws `Operation not permitted`:
 1. Clone branch.
 2. Apply changes following zero-sandbox-violation rules.
 3. Run UI stability verification.
-4. Push and submit PR to `https://github.com/onlyVishesh/omarchy-power-manager`.
+4. Run `python3 -m unittest discover -s tests -v` and check the commit diff.
+5. Follow the user's requested review and approval process before publishing commits or a pull request.

@@ -18,6 +18,62 @@ If you are searching for the **best plugin for omarchy**, **top plugins for omar
 
 ---
 
+## Changes in this fork
+
+This fork retains the `onlyvishesh.power-manager` plugin ID and configuration
+file so existing settings continue to work.
+
+- The desktop plugin applies saved AC, battery-high, and battery-low policies.
+  Editing a setting does not activate it until it is saved.
+- Optional Cardwire GPU switching and internal-display refresh rates have
+  separate AC and battery values. Automatic GPU and refresh controls are off
+  by default. ASUS Ultimate mode requires a restart and is left unchanged.
+- Brightness has a separate value for each power state. A value of zero skips
+  adjustment. While automatic controls are enabled, manual GPU, refresh-rate,
+  and brightness changes are remembered for their power source.
+- Native Wayland idle tracking respects idle inhibitors and Omarchy's
+  stay-awake toggle. Sleep commands also check systemd inhibitors and retry
+  after a blocked attempt. Lock and screensaver timings stay under Omarchy's
+  control.
+- GPU, display, brightness, profiles, and idle timers work as the desktop user.
+  Privileged helpers are needed for lid rules, charge limits, and hibernation
+  delays. The corresponding controls are disabled if the backend is absent.
+- Backend validation rejects unsupported profiles, sleep actions, durations,
+  charge percentages, and battery paths. Apply failures return a nonzero exit
+  status. Systemd handles lid events; the desktop plugin owns idle sleep.
+- Menu commands open the standalone panel without also opening the bar popup.
+  Panel corners follow the active Omarchy theme.
+
+Install this fork with the current Omarchy CLI:
+
+```bash
+omarchy plugin add https://github.com/sadraalikhah/omarchy-power-manager.git --enable
+```
+
+If the original plugin is already installed, preserve its directory and
+settings before replacing the checkout. Do not run a second copy alongside
+it. The old `cloud.battery-auto-suspend` service is superseded by the desktop
+policy controls. This fork does not automatically disable the screensaver on
+battery, which was a separate behavior of that service.
+
+The desktop helper requires Python 3. GPU switching requires Cardwire, and
+display control uses Omarchy's Hyprland commands. The privileged backend is
+still installed separately using `extras/install.sh`.
+
+Run the policy tests without changing hardware or system configuration:
+
+```bash
+python3 -m unittest discover -s tests -v
+node --check Model.js
+bash -n scripts/power-manager-apply scripts/power-manager-limit scripts/power-manager-profile-switch
+```
+
+The tests cover charger states, manual preference retention, display geometry,
+GPU restart consent, invalid settings, generated systemd rules, and helper
+failure propagation. They replace hardware commands with test doubles. Live
+Wayland idle tracking and suspend/resume still require testing in a desktop
+session.
+
 ## 📸 Interface Tour
 
 ### 📊 Overview Dashboard & Battery Health
@@ -53,7 +109,7 @@ Unlike generic power scripts, Omarchy Power Manager features **dynamic hardware 
 - 🧠 **Smart Battery Thresholds:** Automatically shifts your laptop between AC, Battery High, and Battery Low profiles dynamically based on your actual battery percentage.
 - 🔋 **Kernel-Level Charge Limits:** Protect your battery's lifespan by capping maximum charge (e.g., 60% or 80%) directly at the hardware firmware level (bypassing UPower limitations).
 - ⚡ **Real-Time Logind Rewriting:** Unplugging your laptop physically rewrites your Linux kernel lid-close rules on the fly via a background `udev` worker. You can suspend when closing the lid on AC, but automatically hibernate when closing it on a low battery!
-- 🛡️ **Flawless Wayland Integration:** Native hooks into Omarchy's lock screen and idle timers. Intelligently provides a 60-second grace period upon waking up to prevent instant wake-loops.
+- **Wayland idle tracking:** Uses the compositor's idle monitor, saved timeout settings, and sleep inhibitors. Omarchy keeps control of locking and screensavers.
 
 ---
 
@@ -62,7 +118,7 @@ Unlike generic power scripts, Omarchy Power Manager features **dynamic hardware 
 ### Option 1: Omarchy CLI (Recommended)
 This plugin is available on the Omarchy Plugin Marketplace. Install it directly via the shell:
 ```bash
-omarchy plugin install onlyvishesh.power-manager
+omarchy plugin add https://github.com/sadraalikhah/omarchy-power-manager.git --enable
 ```
 After installation, you **must** initialize the backend services to enable advanced power features (like charge limits and lid actions). Run the included installer script:
 ```bash
@@ -73,7 +129,7 @@ omarchy restart shell
 ### Option 2: Manual Installation
 Clone this repository directly into your Omarchy plugins directory:
 ```bash
-git clone https://github.com/onlyvishesh/omarchy-power-manager.git ~/.config/omarchy/plugins/onlyvishesh.power-manager
+git clone https://github.com/sadraalikhah/omarchy-power-manager.git ~/.config/omarchy/plugins/onlyvishesh.power-manager
 ```
 Next, install the secure backend services:
 ```bash
@@ -133,7 +189,7 @@ For Omarchy users, hibernation can be safely toggled and configured using the of
 *Note: Do not trust `upower -i` for charge limits, as it caches stale data. Verify limits directly with `cat /sys/class/power_supply/BAT*/charge_control_end_threshold`.*
 
 ### 3. System Sleeps Immediately After Waking Up
-**Fix:** The plugin guarantees a 60-second grace period upon waking up. If you experience weird behavior, go to the **Diagnostics** tab and click **"Reset All Settings to Defaults"**.
+Check for a second idle manager or an enabled `cloud.battery-auto-suspend` service. This fork uses native Wayland idle tracking and does not maintain a separate lock-screen countdown. Inspect the saved idle action and timeout for the current power state.
 
 ### 4. Lid Settings Don't Seem to Apply
 **Fix:** When you click "Apply All Settings", a Polkit graphical prompt asks for your password to write the rules via `pkexec`. If you cancel this prompt, the background rewriting will fail. Ensure your polkit agent is running.

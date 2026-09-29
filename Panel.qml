@@ -472,7 +472,7 @@ Panel {
         width: parent.width
         height: Style.space(40)
         color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.04)
-        radius: Style.space(10)
+        radius: Style.cornerRadius
         border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
         
         Row {
@@ -493,7 +493,7 @@ Panel {
               }
               Rectangle {
                 anchors.fill: parent
-                radius: Style.space(7)
+                radius: Style.cornerRadius / 2
                 color: root.currentTab === modelData.value 
                   ? Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.1) 
                   : (parent.containsMouse ? Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05) : "transparent")
@@ -541,7 +541,7 @@ Panel {
           Rectangle {
             width: Style.space(44)
             height: Style.space(44)
-            radius: Style.space(10)
+            radius: Style.cornerRadius
             color: Qt.rgba(root.themeAccent.r, root.themeAccent.g, root.themeAccent.b, 0.12)
             border.color: Qt.rgba(root.themeAccent.r, root.themeAccent.g, root.themeAccent.b, 0.25)
             
@@ -578,7 +578,7 @@ Panel {
           Rectangle {
             width: Style.space(64)
             height: Style.space(28)
-            radius: Style.space(8)
+            radius: Style.cornerRadius
             color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.08)
             border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.1)
             anchors.verticalCenter: parent.verticalCenter
@@ -628,7 +628,7 @@ Panel {
           visible: root.batteryInfo.percentage !== undefined
           width: parent.width
           height: metricsGrid.implicitHeight + Style.space(28)
-          radius: Style.space(12)
+          radius: Style.cornerRadius
           color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.03)
           border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
           
@@ -1344,7 +1344,7 @@ Panel {
     anchorItem: barBtn
     owner: root
     bar: root.bar
-    open: root.opened
+    open: root.opened && !root.openedFromMenu
     contentWidth: popupPanel.fittedContentWidth(Style.space(480))
     contentHeight: popupPanel.fittedContentHeight(popupFlick.contentHeight + Style.space(32))
 
@@ -1421,7 +1421,7 @@ Panel {
     Rectangle {
       width: Style.space(44)
       height: Style.space(24)
-      radius: height / 2
+      radius: Style.cornerRadius > 0 ? height / 2 : 0
       anchors.verticalCenter: parent.verticalCenter
       anchors.right: parent.right
       color: customToggleRoot.checked ? root.themeAccent : Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.2)
@@ -1430,7 +1430,7 @@ Panel {
       Rectangle {
         width: Style.space(18)
         height: Style.space(18)
-        radius: width / 2
+        radius: Style.cornerRadius > 0 ? width / 2 : 0
         color: customToggleRoot.checked ? (root.bar ? root.bar.background : Color.background) : (root.bar ? root.bar.foreground : Color.foreground)
         anchors.verticalCenter: parent.verticalCenter
         x: customToggleRoot.checked ? parent.width - width - Style.space(3) : Style.space(3)
@@ -1509,7 +1509,7 @@ Panel {
     signal clicked()
     
     height: Style.space(36)
-    radius: Style.space(8)
+    radius: Style.cornerRadius
     color: active 
       ? Qt.rgba(root.themeAccent.r, root.themeAccent.g, root.themeAccent.b, 0.15)
       : Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
@@ -1547,7 +1547,7 @@ Panel {
     signal clicked()
     
     height: Style.space(36)
-    radius: Style.space(8)
+    radius: Style.cornerRadius
     color: active 
       ? Qt.rgba(root.themeAccent.r, root.themeAccent.g, root.themeAccent.b, 0.15)
       : Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
@@ -1574,7 +1574,7 @@ Panel {
     signal accepted()
     width: parent ? parent.width : Style.space(60)
     height: Style.space(28)
-    radius: Style.space(6)
+    radius: Style.cornerRadius
     color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
     border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.1)
     
@@ -1622,7 +1622,7 @@ Panel {
     Rectangle {
       id: bgRect
       anchors.fill: parent
-      radius: Style.space(6)
+      radius: Style.cornerRadius
       color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.05)
       border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.1)
       
@@ -1663,7 +1663,7 @@ Panel {
       background: Rectangle {
         color: Qt.rgba(root.bar ? root.bar.background.r : Color.background.r, root.bar ? root.bar.background.g : Color.background.g, root.bar ? root.bar.background.b : Color.background.b, 1.0)
         border.color: Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.15)
-        radius: Style.space(6)
+        radius: Style.cornerRadius
       }
       contentItem: Column {
         spacing: 0
@@ -1673,7 +1673,7 @@ Panel {
             width: dropdownRoot.width - Style.space(8)
             height: Style.space(28)
             color: mouseArea.containsMouse ? Qt.rgba(root.bar ? root.bar.foreground.r : Color.foreground.r, root.bar ? root.bar.foreground.g : Color.foreground.g, root.bar ? root.bar.foreground.b : Color.foreground.b, 0.1) : "transparent"
-            radius: Style.space(4)
+            radius: Style.cornerRadius / 2
             Text {
               anchors.verticalCenter: parent.verticalCenter
               anchors.left: parent.left
